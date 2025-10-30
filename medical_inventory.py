@@ -1,297 +1,229 @@
 #############################################
-#to do list
-#1. integrate facial recognition with barcode scanner
-#4. add feature to edit a row from the csv file
-#5. add feature to search for a specific barcode
-#6. add feature to filter by date
-#7. add feature to export the csv file
-#8. add feature to convert barcode to text
-#9. add voice recognition placeholder
-#require auth before log
-#boot on start up
+# To Do List (Kivy Version)
+# SWITCH TO DATABASE
+# 4. add feature to edit a row from the csv file
+# 5. add feature to search for a specific barcode
+# 6. add feature to filter by date
+# 7. add feature to export the csv file
+# 8. add feature to convert barcode to text
+# 9. add voice recognition placeholder
+# boot on start up
 #############################################
 
-
-
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
 import csv
 import os
-import facial_recognition as fr
 from datetime import datetime
+from kivy.app import App
+from kivy.clock import Clock
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.uix.popup import Popup
+from kivy.uix.textinput import TextInput
+from kivy.uix.recycleview import RecycleView
+from kivy.uix.recyclegridlayout import RecycleGridLayout
+from kivy.uix.recycleview.views import RecycleDataViewBehavior
+from kivy.uix.scrollview import ScrollView
+from kivy.properties import BooleanProperty
+from kivy.core.window import Window
+import facial_recognition as fr
 
+# set fullscreen for Raspberry Pi (make safe — some SDL backends may raise)
+try:
+    Window.fullscreen = True
+except Exception:
+    try:
+        Window.fullscreen = 'auto'
+    except Exception:
+        # ignore if fullscreen cannot be set in this environment
+        pass
 
-# ensure scans.csv lives next to this script
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scans.csv")
-REFRESH_INTERVAL = 15000  # 3 sec
+REFRESH_INTERVAL = 15  # seconds
 
-class BarcodeViewer(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Medical Inventory System")
-        # start fullscreen
-        try:
-            # prefer true fullscreen (hides window decorations)
-            self.attributes("-fullscreen", True)
-        except Exception:
-            # fallback to maximized state where available
-            try:
-                self.state("zoomed")
-            except Exception:
-                self.geometry("1200x800")
+# ------------------- GUI COMPONENTS -------------------
 
-        # larger default styling for readability on fullscreen
-        style = ttk.Style(self)
-        style.configure("TLabel", font=("Arial", 20))
-        style.configure("TButton", font=("Arial", 16), padding=10)
-        style.configure("Treeview", font=("Arial", 16), rowheight=36)
-        style.configure("Treeview.Heading", font=("Arial", 18, "bold"))
+class SelectableLabel(RecycleDataViewBehavior, Label):
+    """Selectable row in the list."""
+    index = None
+    selected = BooleanProperty(False)
+    selectable = BooleanProperty(True)
 
-        # allow toggling fullscreen with F11 and exit fullscreen with Escape
-        self.bind("<F11>", lambda e: self.attributes("-fullscreen", not self.attributes("-fullscreen")))
-        self.bind("<Escape>", lambda e: self.attributes("-fullscreen", False))
+    def refresh_view_attrs(self, rv, index, data):
+        self.index = index
+        return super().refresh_view_attrs(rv, index, data)
 
-        # keep current log path on the instance
-        self.log_file = LOG_FILE
+    def on_touch_down(self, touch):
+        if super().on_touch_down(touch):
+            return True
+        if self.collide_point(*touch.pos):
+            self.selected = not self.selected
+            rv = self.parent.parent
+            rv.select_row(self.index)
+            return True
+        return False
+
+    def apply_selection(self, rv, index, is_selected):
+        self.selected = is_selected
+        self.color = (1, 0, 0, 1) if is_selected else (1, 1, 1, 1)
+
+class BarcodeList(RecycleView):
+    """Displays the log entries."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.data = []
+        # use the SelectableLabel class as the viewclass
+        self.viewclass = SelectableLabel
+
+        # create a layout manager and add it as a child of the RecycleView
+        layout = RecycleGridLayout(cols=3,
+                                   default_size=(None, 48),
+                                   default_size_hint=(1, None),
+                                   size_hint_y=None)
+        layout.bind(minimum_height=layout.setter('height'))
+        # layout_manager must be a widget child of the RecycleView
+        self.add_widget(layout)
+        self.layout_manager = layout
+
+    def load_data(self, rows):
+        self.data = [{"text": f"{r[0]} | {r[1]} | {r[2]}"} for r in rows]
+
+    def select_row(self, index):
+        for i, row in enumerate(self.data):
+            if i == index:
+                self.data[i]["selected"] = not self.data[i].get("selected", False)
+
+
+# ------------------- MAIN APP LOGIC -------------------
+
+class InventoryApp(BoxLayout):
+    """Main application logic and UI."""
+    def __init__(self, **kwargs):
+        super().__init__(orientation='vertical', **kwargs)
 
         # Title
-        ttk.Label(self, text="Medical Inventory system" , font=("Arial", 22, "bold")).pack(pady=12)
+        self.add_widget(Label(text="[b]Medical Inventory System[/b]", markup=True, font_size=32, size_hint_y=None, height=60))
 
-        # Button frame (webcam + log + quit)
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(pady=5)
-        ttk.Button(btn_frame, text="Open Camera", command=self.face_recognition).grid(row=0, column=0, padx=5)
-        ttk.Button(btn_frame, text="Log Scan", command=self.log_scan).grid(row=0, column=1, padx=5)
-        ttk.Button(btn_frame, text="Quit", command=self.destroy).grid(row=0, column=3, padx=5)
-        ttk.Button(btn_frame, text="Delete Selected", command=self.delete_selected).grid(row=0, column=2, padx=5)
+        # Buttons row
+        btns = BoxLayout(size_hint_y=None, height=60)
+        btns.add_widget(Button(text="Open Camera", on_press=lambda x: self.face_recognition()))
+        btns.add_widget(Button(text="Log Scan", on_press=lambda x: self.log_scan()))
+        btns.add_widget(Button(text="Delete Selected", on_press=lambda x: self.delete_selected()))
+        btns.add_widget(Button(text="Quit", on_press=lambda x: App.get_running_app().stop()))
+        self.add_widget(btns)
 
-        # Create Treeview (table) with user column
-        columns = ("timestamp", "barcode", "user")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings")
-        self.tree.heading("timestamp", text="Timestamp")
-        self.tree.heading("barcode", text="Barcode")
-        self.tree.heading("user", text="User")
+        # Scrollable list
+        self.viewer = BarcodeList()
+        scroll = ScrollView()
+        scroll.add_widget(self.viewer)
+        self.add_widget(scroll)
 
-        # Add scrollbar
-        scroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(fill="both", expand=True, side="left", padx=(10, 0))
-        scroll.pack(fill="y", side="right", padx=(0, 10))
-
-        # Load data and start auto-refresh
+        # Load initial data and schedule refresh
         self.load_data()
-        self.after(REFRESH_INTERVAL, self.refresh_data)
+        Clock.schedule_interval(lambda dt: self.load_data(), REFRESH_INTERVAL)
+
+    # ------------------- Data Logic -------------------
 
     def face_recognition(self):
-        # run face recognition and return a username (string) if available
+        """Integrate face recognition."""
         result = fr.main()
-
-        # backward-compatible numeric error codes
         if isinstance(result, int):
-            if result == 4:
-                messagebox.showerror("Camera Error", "Couldn't find camera")
-            elif result == 3:
-                messagebox.showerror("Reference Folder Error", "No reference folder found")
-            elif result == 2:
-                messagebox.showerror("No Faces Found", "No faces found in reference images")
+            msg = {
+                4: "Couldn't find camera",
+                3: "No reference folder found",
+                2: "No faces found in reference images"
+            }.get(result, "Unknown error")
+            self.show_popup("Face Recognition Error", msg)
             return ""
-
-        # expected: list/tuple of detected names (or empty list)
-        if isinstance(result, (list, tuple)):
-            if not result:
-                messagebox.showinfo("Face Recognition", "No known faces detected.")
-                return ""
-            # use the first detected name as the user
-            detected_name = str(result[0])
-            messagebox.showinfo("Face Recognition", f"Detected: {detected_name}")
-            return detected_name
-
-        # unexpected return type
-        messagebox.showerror("Face Recognition", f"Unexpected result from recognizer: {result}")
+        if isinstance(result, (list, tuple)) and result:
+            name = str(result[0])
+            self.show_popup("Face Recognition", f"Detected: {name}")
+            return name
+        self.show_popup("Face Recognition", "No known faces detected.")
         return ""
 
-    def _prompt_for_barcode(self, prompt="Scan barcode and press Enter", title="Scan Barcode"):
-        """
-        Open a modal dialog with a single Entry focused. Return the scanned text
-        (str) when Enter is pressed, or None if canceled/closed.
-        Works with barcode scanners that act as keyboard input (they send Enter).
-        """
-        dlg = tk.Toplevel(self)
-        dlg.title(title)
-        dlg.transient(self)
-        dlg.grab_set()
-        dlg.resizable(False, False)
+    def prompt_barcode(self):
+        """Popup for barcode input."""
+        layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
+        input_box = TextInput(hint_text="Scan barcode and press OK", multiline=False, font_size=20)
+        layout.add_widget(input_box)
 
-        ttk.Label(dlg, text=prompt).pack(padx=12, pady=(8, 4))
+        result = {"barcode": None}
 
-        entry_var = tk.StringVar()
-        entry = ttk.Entry(dlg, textvariable=entry_var, width=40)
-        entry.pack(padx=12, pady=(0, 8))
-        entry.focus_set()
+        def on_ok(instance):
+            result["barcode"] = input_box.text.strip()
+            popup.dismiss()
 
-        result = {"value": None}
+        btn = Button(text="OK", size_hint_y=None, height=50, on_press=on_ok)
+        layout.add_widget(btn)
 
-        def on_ok(event=None):
-            val = entry_var.get().strip()
-            if val == "":
-                # ignore empty submit
-                return
-            result["value"] = val
-            dlg.grab_release()
-            dlg.destroy()
+        popup = Popup(title="Scan Barcode", content=layout, size_hint=(0.6, 0.4))
+        popup.open()
+        input_box.focus = True
 
-        def on_cancel(event=None):
-            dlg.grab_release()
-            dlg.destroy()
+        # Wait for popup to close (Kivy async-style)
+        def check_result(dt):
+            if result["barcode"]:
+                return False
+            Clock.schedule_once(check_result, 0.1)
+        Clock.schedule_once(check_result, 0.1)
 
-        # Buttons
-        btn_frame = ttk.Frame(dlg)
-        btn_frame.pack(pady=(0, 8))
-        ok_btn = ttk.Button(btn_frame, text="OK", command=on_ok)
-        ok_btn.pack(side="left", padx=6)
-        cancel_btn = ttk.Button(btn_frame, text="Cancel", command=on_cancel)
-        cancel_btn.pack(side="left", padx=6)
-
-        # Bind Enter to OK and Escape to cancel
-        entry.bind("<Return>", on_ok)
-        dlg.bind("<Escape>", on_cancel)
-
-        # Center dialog over parent
-        self.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() // 2) - (dlg.winfo_reqwidth() // 2)
-        y = self.winfo_rooty() + (self.winfo_height() // 2) - (dlg.winfo_reqheight() // 2)
-        dlg.geometry(f"+{x}+{y}")
-
-        # Wait for user (modal)
-        self.wait_window(dlg)
-        return result["value"]
+        return result
 
     def log_scan(self):
-        """Wait for a barcode to be scanned (or typed) and log current date/time + barcode."""
+        """Log scan with timestamp and user."""
         user = self.face_recognition()
-        
-        # Only proceed with barcode scanning if face recognition was successful
         if not user:
-            messagebox.showerror("Authentication Required", "Face recognition must be successful before scanning barcodes.")
-            return
-        
-        barcode = self._prompt_for_barcode()
-        if barcode is None:
-            # user cancelled or closed dialog
+            self.show_popup("Authentication Required", "Face recognition must be successful before scanning barcodes.")
             return
 
-        # ensure directory exists (ignore if dirname is empty)
-        try:
-            os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
-        except Exception:
-            pass
+        popup = self.prompt_barcode()
 
-        file_exists = os.path.exists(self.log_file)
-        try:
-            with open(self.log_file, "a", newline="", encoding="utf-8") as f:
+        # Delay checking barcode input until popup closes
+        def finalize_log(dt):
+            barcode = popup.get("barcode")
+            if not barcode:
+                return
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            file_exists = os.path.exists(LOG_FILE)
+            with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 if not file_exists:
                     writer.writerow(["timestamp", "barcode", "user"])
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 writer.writerow([ts, barcode, user])
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to write to CSV:\n{e}")
-            return
-
-        # reload view and notify user
-        self.load_data()
-        messagebox.showinfo("Logged", f"Logged {barcode} at {ts} by {user}")
+            self.show_popup("Logged", f"Logged {barcode} at {ts} by {user}")
+            self.load_data()
+        Clock.schedule_once(finalize_log, 0.5)
 
     def load_data(self):
-        """Read the CSV file and load rows into the table."""
-        self.tree.delete(*self.tree.get_children())  # clear old data
-        if not os.path.exists(self.log_file):
-            print(f"File not found: {self.log_file}")
+        """Reload from CSV."""
+        if not os.path.exists(LOG_FILE):
+            self.viewer.load_data([])
             return
-
-        try:
-            with open(self.log_file, newline="", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                header = next(reader, None)  # skip header
-                for row in reader:
-                    # support rows with or without the user column
-                    if len(row) >= 2:
-                        ts = row[0]
-                        bc = row[1]
-                        user = row[2] if len(row) >= 3 else ""
-                        self.tree.insert("", "end", values=(ts, bc, user))
-        except Exception as e:
-            print("Error reading file:", e)
-
-    def file_path(self):
-        # show which file we're reading (useful for debugging)
-        print ("Looking for CSV at:", os.path.abspath(self.log_file))
-
-        # Check if file exists
-
+        with open(LOG_FILE, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            rows = [r for r in reader if len(r) >= 3]
+        self.viewer.load_data(rows)
 
     def delete_selected(self):
-        """Delete selected rows from the treeview and the underlying CSV file."""
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("Delete", "No row selected.")
-            return
+        """Delete selected rows."""
+        # NOTE: Placeholder — actual selection logic in Kivy RV needs explicit tracking.
+        self.show_popup("Delete", "Row deletion not yet implemented in Kivy version.")
 
-        if not messagebox.askyesno("Confirm Delete", f"Delete {len(sel)} selected row(s)?"):
-            return
+    def show_popup(self, title, message):
+        layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
+        layout.add_widget(Label(text=message, font_size=18))
+        layout.add_widget(Button(text="OK", size_hint_y=None, height=50, on_press=lambda x: popup.dismiss()))
+        popup = Popup(title=title, content=layout, size_hint=(0.6, 0.4))
+        popup.open()
 
-        # Gather selected values as tuples (timestamp, barcode)
-        selected_vals = [tuple(self.tree.item(i, "values")) for i in sel]
 
-        # Read existing CSV
-        try:
-            with open(self.log_file, newline="", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                rows = list(reader)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to read CSV:\n{e}")
-            return
+# ------------------- RUN -------------------
 
-        if not rows:
-            messagebox.showinfo("Delete", "CSV is empty.")
-            return
+class MedicalInventoryApp(App):
+    def build(self):
+        return InventoryApp()
 
-        header = rows[0]
-        data = rows[1:]
 
-        # For each selected value, remove the first matching row in data
-        for sv in selected_vals:
-            for idx, r in enumerate(data):
-                if len(r) >= len(sv) and tuple(r[:len(sv)]) == sv:
-                    data.pop(idx)
-                    break
-
-        # Write CSV back
-        try:
-            with open(self.log_file, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(header)
-                writer.writerows(data)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to update CSV:\n{e}")
-            return
-
-        # Refresh view and inform user
-        self.load_data()
-        messagebox.showinfo("Deleted", f"Deleted {len(selected_vals)} row(s).")
-
-    def refresh_data(self):
-        """Reload file periodically."""
-        self.load_data()
-        self.after(REFRESH_INTERVAL, self.refresh_data)
-
-    def show_error(self, title="Error", message="An error occurred."):
-        """Display an error window with the given title and message."""
-        messagebox.showerror(title, message)
-
-# Example usage:
-# self.show_error("File Error", "Could not open CSV file.")
-
-if __name__ == "__main__":
-    app = BarcodeViewer()
-    app.mainloop()
+MedicalInventoryApp().run()

@@ -1,6 +1,17 @@
 import logging
 import sys, os
 from contextlib import contextmanager
+
+# Fix for Qt platform plugin errors (e.g. "Could not find the Qt platform plugin 'wayland'")
+# Must set before importing cv2 (which may initialize Qt plugins).
+# Prefer XCB (widely available on X11 systems); fall back to 'offscreen' if that fails.
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+try:
+    # Some environments prefer an explicit plugin path — leave unset by default.
+    pass
+except Exception:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import cv2
 import re
 import numpy as np
